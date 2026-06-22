@@ -80,6 +80,7 @@ impl P {
     }
 
     /// Rounded-rectangle outline of thickness `t` (logical).
+    #[allow(clippy::too_many_arguments)]
     fn rrect_outline(&mut self, x: i64, y: i64, w: i64, h: i64, r: i64, t: i64, c: Col) {
         self.rrect(x, y, w, h, r, c);
         // Carve the interior back out — caller draws onto a known background,
