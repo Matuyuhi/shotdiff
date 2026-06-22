@@ -182,11 +182,7 @@ fn draw_screen(after: bool) -> RgbaImage {
     p.rrect(24, 416, 80, 12, 6, INK);
 
     // ----- cards -----
-    let thumbs = [
-        if after { PURPLE } else { ORANGE },
-        TEAL,
-        BLUE,
-    ];
+    let thumbs = [if after { PURPLE } else { ORANGE }, TEAL, BLUE];
     for (i, thumb) in thumbs.iter().enumerate() {
         let y = 444 + i as i64 * 104;
         p.rrect(16, y, 358, 92, 18, WHITE);
