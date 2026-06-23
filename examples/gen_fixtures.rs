@@ -1,9 +1,9 @@
 // Generates the demo screenshots used by the README: a believable iOS-style
 // profile screen, rendered at 3x and downscaled for anti-aliasing. The BEFORE
-// and AFTER frames are identical except for three natural changes:
-//   * the primary button flips Follow (filled) -> Following (outlined)
-//   * a notification badge appears on the bell
-//   * the first card's thumbnail changes colour
+// and AFTER frames are identical except for one thing — in AFTER the whole
+// card list is nudged down by a few pixels, simulating the layout-shift
+// regression that screenshot diffing is meant to catch. The diff ghosts every
+// moved card edge in pink.
 //
 //   cargo run --release --example gen_fixtures
 use image::{Rgba, RgbaImage};
@@ -20,10 +20,8 @@ const INK: Col = [58, 58, 66, 255]; // "text"
 const FAINT: Col = [199, 199, 204, 255]; // secondary "text"
 const BLUE: Col = [0, 122, 255, 255];
 const ORANGE: Col = [255, 149, 0, 255];
-const PURPLE: Col = [175, 82, 222, 255];
 const TEAL: Col = [48, 176, 199, 255];
 const INDIGO: Col = [88, 86, 214, 255];
-const RED: Col = [255, 59, 48, 255];
 
 struct P {
     img: RgbaImage,
@@ -77,14 +75,6 @@ impl P {
                 }
             }
         }
-    }
-
-    /// Rounded-rectangle outline of thickness `t` (logical).
-    fn rrect_outline(&mut self, x: i64, y: i64, w: i64, h: i64, r: i64, t: i64, c: Col) {
-        self.rrect(x, y, w, h, r, c);
-        // Carve the interior back out — caller draws onto a known background,
-        // so punch with the background colour.
-        self.rrect(x + t, y + t, w - 2 * t, h - 2 * t, (r - t).max(0), BG);
     }
 
     fn circle(&mut self, cx: i64, cy: i64, r: i64, c: Col) {
@@ -151,9 +141,6 @@ fn draw_screen(after: bool) -> RgbaImage {
     p.rrect(348, 66, 18, 16, 6, INK);
     p.rect(353, 82, 8, 3, INK);
     p.circle(357, 89, 2, INK);
-    if after {
-        p.circle(367, 65, 5, RED); // notification badge
-    }
 
     // ----- profile header -----
     p.circle(195, 168, 44, INDIGO);
@@ -169,22 +156,20 @@ fn draw_screen(after: bool) -> RgbaImage {
         p.rrect(cx - 30, 306, 60, 9, 4, FAINT); // label
     }
 
-    // ----- primary button: Follow (filled) -> Following (outline) -----
-    if after {
-        p.rrect_outline(40, 338, 310, 50, 25, 3, BLUE);
-        p.rrect(160, 357, 70, 12, 6, BLUE); // "Following"
-    } else {
-        p.rrect(40, 338, 310, 50, 25, BLUE);
-        p.rrect(170, 357, 50, 12, 6, WHITE); // "Follow"
-    }
+    // ----- primary button -----
+    p.rrect(40, 338, 310, 50, 25, BLUE);
+    p.rrect(170, 357, 50, 12, 6, WHITE); // "Follow"
 
     // ----- section header -----
     p.rrect(24, 416, 80, 12, 6, INK);
 
     // ----- cards -----
-    let thumbs = [if after { PURPLE } else { ORANGE }, TEAL, BLUE];
+    // AFTER nudges the whole list down — the layout-shift regression we want
+    // the diff to catch. Everything above stays put.
+    let shift = if after { 16 } else { 0 };
+    let thumbs = [ORANGE, TEAL, BLUE];
     for (i, thumb) in thumbs.iter().enumerate() {
-        let y = 444 + i as i64 * 104;
+        let y = 444 + i as i64 * 104 + shift;
         p.rrect(16, y, 358, 92, 18, WHITE);
         p.rrect(32, y + 14, 64, 64, 16, *thumb); // thumbnail
         p.rrect(112, y + 22, 170, 13, 6, INK); // title
