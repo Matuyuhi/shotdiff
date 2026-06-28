@@ -132,13 +132,13 @@ fn parse_max_diff(v: &str) -> Result<(f64, bool), String> {
 }
 
 /// Per-pixel max absolute channel difference across RGBA.
+/// Optimized: unrolled for auto-vectorization and avoiding loop overhead.
 #[inline]
 fn pixel_delta(a: &[u8; 4], b: &[u8; 4]) -> u8 {
-    let mut d = 0u8;
-    for i in 0..4 {
-        d = d.max(a[i].abs_diff(b[i]));
-    }
-    d
+    a[0].abs_diff(b[0])
+        .max(a[1].abs_diff(b[1]))
+        .max(a[2].abs_diff(b[2]))
+        .max(a[3].abs_diff(b[3]))
 }
 
 /// Place `src` at the top-left of a `w`x`h` canvas filled with `bg`.
@@ -157,16 +157,40 @@ fn build_diff(a: &RgbaImage, b: &RgbaImage, threshold: u8) -> (RgbaImage, u64) {
     let (w, h) = a.dimensions();
     let mut out = RgbaImage::new(w, h);
     let mut changed = 0u64;
-    for ((pa, pb), out_px) in a.pixels().zip(b.pixels()).zip(out.pixels_mut()) {
-        if pixel_delta(&pa.0, &pb.0) > threshold {
+
+    // Optimized: Use raw slice chunks instead of `image::Pixels` iterators.
+    // Iterating over flat samples is significantly faster than creating Rgba wrappers per pixel.
+    let a_flat = a.as_flat_samples();
+    let b_flat = b.as_flat_samples();
+    let mut out_flat = out.as_flat_samples_mut();
+
+    let it = a_flat
+        .as_slice()
+        .chunks_exact(4)
+        .zip(b_flat.as_slice().chunks_exact(4))
+        .zip(out_flat.as_mut_slice().chunks_exact_mut(4));
+
+    for ((pa, pb), out_px) in it {
+        // Since we know chunks are exactly 4 bytes, we can safely cast to array refs
+        let pa_arr: &[u8; 4] = pa.try_into().unwrap();
+        let pb_arr: &[u8; 4] = pb.try_into().unwrap();
+
+        if pixel_delta(pa_arr, pb_arr) > threshold {
             changed += 1;
-            *out_px = PINK;
+            out_px.copy_from_slice(&PINK.0);
         } else {
             // Lightened greyscale of the AFTER pixel as quiet context (128..=255).
-            let [r, g, bl, _] = pb.0;
-            let luma = (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * bl as f32) as u32;
+            let r = pb_arr[0];
+            let g = pb_arr[1];
+            let bl = pb_arr[2];
+            // Optimized: integer arithmetic with bitshifts is significantly faster than floating point.
+            // 0.299 * 65536 ≈ 19595, 0.587 * 65536 ≈ 38470, 0.114 * 65536 ≈ 7471
+            let luma = (19595 * r as u32 + 38470 * g as u32 + 7471 * bl as u32) >> 16;
             let v = (128 + luma / 2).min(255) as u8;
-            *out_px = Rgba([v, v, v, 0xFF]);
+            out_px[0] = v;
+            out_px[1] = v;
+            out_px[2] = v;
+            out_px[3] = 0xFF;
         }
     }
     (out, changed)
