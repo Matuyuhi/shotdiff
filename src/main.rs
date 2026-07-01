@@ -317,9 +317,16 @@ fn run_browser(args: &Args) -> Result<(), String> {
     let uri_b = data_uri(&args.after)?;
     let html = build_html(&uri_a, &uri_b, args.threshold);
 
-    let pid = std::process::id();
-    let path = std::env::temp_dir().join(format!("shotdiff-{pid}.html"));
-    std::fs::write(&path, html).map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+    let mut temp = tempfile::Builder::new()
+        .prefix("shotdiff-")
+        .suffix(".html")
+        .tempfile()
+        .map_err(|e| format!("failed to create temporary file: {e}"))?;
+    std::io::Write::write_all(&mut temp, html.as_bytes())
+        .map_err(|e| format!("failed to write temporary file: {e}"))?;
+    let (_, path) = temp
+        .keep()
+        .map_err(|e| format!("failed to keep temporary file: {e}"))?;
     eprintln!("shotdiff: wrote {}", path.display());
 
     open_in_browser(&path)
