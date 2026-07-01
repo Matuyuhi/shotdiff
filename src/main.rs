@@ -134,11 +134,11 @@ fn parse_max_diff(v: &str) -> Result<(f64, bool), String> {
 /// Per-pixel max absolute channel difference across RGBA.
 #[inline]
 fn pixel_delta(a: &[u8; 4], b: &[u8; 4]) -> u8 {
-    let mut d = 0u8;
-    for i in 0..4 {
-        d = d.max(a[i].abs_diff(b[i]));
-    }
-    d
+    a.iter()
+        .zip(b.iter())
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap_or(0)
 }
 
 /// Place `src` at the top-left of a `w`x`h` canvas filled with `bg`.
