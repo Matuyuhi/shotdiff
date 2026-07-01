@@ -18,3 +18,10 @@ image = "0.25"
 opt-level = 3
 lto = true
 strip = true
+
+[dev-dependencies]
+criterion = "0.5.1"
+
+[[bench]]
+name = "diff_benchmark"
+harness = false
