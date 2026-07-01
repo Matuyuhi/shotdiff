@@ -585,4 +585,25 @@ mod tests {
             "0 change → fail-on-diff ok"
         );
     }
+
+    #[test]
+    fn test_sniff_mime() {
+        assert_eq!(
+            sniff_mime(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]),
+            "image/png"
+        );
+        assert_eq!(sniff_mime(&[0xFF, 0xD8, 0xFF, 0xDB]), "image/jpeg");
+        assert_eq!(sniff_mime(b"GIF89a"), "image/gif");
+
+        let webp_data = b"RIFF____WEBPVP8 ".to_vec();
+        assert_eq!(sniff_mime(&webp_data), "image/webp");
+
+        assert_eq!(sniff_mime(b"BM6\0\0\0"), "image/bmp");
+
+        assert_eq!(sniff_mime(b"random_data"), "application/octet-stream");
+        assert_eq!(sniff_mime(b""), "application/octet-stream");
+        assert_eq!(sniff_mime(b"RIFF"), "application/octet-stream");
+        assert_eq!(sniff_mime(b"RIFF____"), "application/octet-stream");
+        assert_eq!(sniff_mime(b"RIFF____NOP!"), "application/octet-stream");
+    }
 }
