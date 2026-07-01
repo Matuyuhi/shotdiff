@@ -539,6 +539,50 @@ mod tests {
     }
 
     #[test]
+    fn diff_result_percent() {
+        assert_eq!(
+            DiffResult {
+                changed: 0,
+                total: 0
+            }
+            .percent(),
+            0.0
+        );
+        assert_eq!(
+            DiffResult {
+                changed: 50,
+                total: 10_000
+            }
+            .percent(),
+            0.5
+        );
+        assert_eq!(
+            DiffResult {
+                changed: 10,
+                total: 10
+            }
+            .percent(),
+            100.0
+        );
+        assert_eq!(
+            DiffResult {
+                changed: 3,
+                total: 10
+            }
+            .percent(),
+            30.0
+        );
+        assert_eq!(
+            DiffResult {
+                changed: 1,
+                total: 3
+            }
+            .percent(),
+            1.0 / 3.0 * 100.0
+        );
+    }
+
+    #[test]
     fn gate_logic() {
         let base = |max_diff, fail_on_diff| Args {
             before: PathBuf::new(),
