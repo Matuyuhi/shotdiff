@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use image::{Rgba, RgbaImage};
 
 const PINK: Rgba<u8> = Rgba([0xFF, 0x2D, 0x87, 0xFF]);
