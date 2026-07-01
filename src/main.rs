@@ -539,6 +539,23 @@ mod tests {
     }
 
     #[test]
+    fn test_b64_encoding() {
+        // Standard RFC 4648 test vectors
+        assert_eq!(b64(b""), "");
+        assert_eq!(b64(b"f"), "Zg==");
+        assert_eq!(b64(b"fo"), "Zm8=");
+        assert_eq!(b64(b"foo"), "Zm9v");
+        assert_eq!(b64(b"foob"), "Zm9vYg==");
+        assert_eq!(b64(b"fooba"), "Zm9vYmE=");
+        assert_eq!(b64(b"foobar"), "Zm9vYmFy");
+
+        // Additional test cases
+        assert_eq!(b64(b"Hello, World!"), "SGVsbG8sIFdvcmxkIQ==");
+        assert_eq!(b64(&[0, 1, 2, 3, 4, 5]), "AAECAwQF");
+        assert_eq!(b64(&[255, 255, 255]), "////");
+    }
+
+    #[test]
     fn gate_logic() {
         let base = |max_diff, fail_on_diff| Args {
             before: PathBuf::new(),
