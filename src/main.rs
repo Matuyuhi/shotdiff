@@ -134,11 +134,10 @@ fn parse_max_diff(v: &str) -> Result<(f64, bool), String> {
 /// Per-pixel max absolute channel difference across RGBA.
 #[inline]
 fn pixel_delta(a: &[u8; 4], b: &[u8; 4]) -> u8 {
-    let mut d = 0u8;
-    for i in 0..4 {
-        d = d.max(a[i].abs_diff(b[i]));
-    }
-    d
+    a[0].abs_diff(b[0])
+        .max(a[1].abs_diff(b[1]))
+        .max(a[2].abs_diff(b[2]))
+        .max(a[3].abs_diff(b[3]))
 }
 
 /// Place `src` at the top-left of a `w`x`h` canvas filled with `bg`.
@@ -163,8 +162,10 @@ fn build_diff(a: &RgbaImage, b: &RgbaImage, threshold: u8) -> (RgbaImage, u64) {
             *out_px = PINK;
         } else {
             // Lightened greyscale of the AFTER pixel as quiet context (128..=255).
+            // Uses integer approximation of NTSC luma (0.299, 0.587, 0.114) for speed
+            // multipliers are (val * 65536) -> shift right 16 bits.
             let [r, g, bl, _] = pb.0;
-            let luma = (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * bl as f32) as u32;
+            let luma = (r as u32 * 19595 + g as u32 * 38470 + bl as u32 * 7471) >> 16;
             let v = (128 + luma / 2).min(255) as u8;
             *out_px = Rgba([v, v, v, 0xFF]);
         }
@@ -449,7 +450,9 @@ function padData(im, W, H) {{
         changed++;
         O[i] = PINK[0]; O[i+1] = PINK[1]; O[i+2] = PINK[2]; O[i+3] = 255;
       }} else if (grey) {{
-        const v = Math.min(255, 128 + ((0.299*B[i] + 0.587*B[i+1] + 0.114*B[i+2]) | 0) / 2) | 0;
+        // Uses integer approximation of NTSC luma for performance
+        const luma = (B[i] * 19595 + B[i+1] * 38470 + B[i+2] * 7471) >> 16;
+        const v = Math.min(255, 128 + (luma / 2) | 0);
         O[i] = O[i+1] = O[i+2] = v; O[i+3] = 255;
       }} else {{
         O[i] = B[i]; O[i+1] = B[i+1]; O[i+2] = B[i+2]; O[i+3] = 255;
