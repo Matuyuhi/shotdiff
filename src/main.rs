@@ -13,6 +13,11 @@ use image::{Rgba, RgbaImage};
 
 /// Pink used to paint changed pixels (#FF2D87).
 const PINK: Rgba<u8> = Rgba([0xFF, 0x2D, 0x87, 0xFF]);
+/// Luma calculation constants.
+const LUMA_R: f32 = 0.299;
+const LUMA_G: f32 = 0.587;
+const LUMA_B: f32 = 0.114;
+
 /// Gap (px) between panels in the composite, and its colour.
 const GAP: u32 = 16;
 const GAP_BG: Rgba<u8> = Rgba([0x1a, 0x1a, 0x1a, 0xFF]);
@@ -164,7 +169,7 @@ fn build_diff(a: &RgbaImage, b: &RgbaImage, threshold: u8) -> (RgbaImage, u64) {
         } else {
             // Lightened greyscale of the AFTER pixel as quiet context (128..=255).
             let [r, g, bl, _] = pb.0;
-            let luma = (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * bl as f32) as u32;
+            let luma = (LUMA_R * r as f32 + LUMA_G * g as f32 + LUMA_B * bl as f32) as u32;
             let v = (128 + luma / 2).min(255) as u8;
             *out_px = Rgba([v, v, v, 0xFF]);
         }
@@ -394,6 +399,9 @@ fn build_html(uri_a: &str, uri_b: &str, threshold: u8) -> String {
 const SRC_A = "{uri_a}";
 const SRC_B = "{uri_b}";
 const PINK = [255, 45, 135];
+const LUMA_R = 0.299;
+const LUMA_G = 0.587;
+const LUMA_B = 0.114;
 
 function load(src) {{
   return new Promise((res, rej) => {{
@@ -449,7 +457,7 @@ function padData(im, W, H) {{
         changed++;
         O[i] = PINK[0]; O[i+1] = PINK[1]; O[i+2] = PINK[2]; O[i+3] = 255;
       }} else if (grey) {{
-        const v = Math.min(255, 128 + ((0.299*B[i] + 0.587*B[i+1] + 0.114*B[i+2]) | 0) / 2) | 0;
+        const v = Math.min(255, 128 + ((LUMA_R*B[i] + LUMA_G*B[i+1] + LUMA_B*B[i+2]) | 0) / 2) | 0;
         O[i] = O[i+1] = O[i+2] = v; O[i+3] = 255;
       }} else {{
         O[i] = B[i]; O[i+1] = B[i+1]; O[i+2] = B[i+2]; O[i+3] = 255;
