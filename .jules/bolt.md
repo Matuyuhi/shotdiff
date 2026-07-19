@@ -1,0 +1,3 @@
+## 2024-07-19 - Optimize pixel processing loop overhead
+**Learning:** The `image` crate's `.pixels()` iterator has significant overhead compared to raw slice iteration. Furthermore, floating-point arithmetic in tight pixel processing loops is a severe bottleneck, and manually unrolling small loops (like pixel channel comparisons) yields measurable speedups.
+**Action:** When working on performance-critical image processing in Rust, prefer chunked iteration over the underlying raw byte slice (e.g., `image.as_raw().chunks_exact(4)`), use integer approximations for floating-point calculations (e.g., `(77 * r + 150 * g + 29 * b) >> 8` for luma), and unroll simple bounded loops manually.
