@@ -131,16 +131,6 @@ fn parse_max_diff(v: &str) -> Result<(f64, bool), String> {
     }
 }
 
-/// Per-pixel max absolute channel difference across RGBA.
-#[inline]
-fn pixel_delta(a: &[u8; 4], b: &[u8; 4]) -> u8 {
-    let mut d = 0u8;
-    for i in 0..4 {
-        d = d.max(a[i].abs_diff(b[i]));
-    }
-    d
-}
-
 /// Place `src` at the top-left of a `w`x`h` canvas filled with `bg`.
 fn pad_to(src: &RgbaImage, w: u32, h: u32, bg: Rgba<u8>) -> RgbaImage {
     if src.width() == w && src.height() == h {
@@ -157,16 +147,39 @@ fn build_diff(a: &RgbaImage, b: &RgbaImage, threshold: u8) -> (RgbaImage, u64) {
     let (w, h) = a.dimensions();
     let mut out = RgbaImage::new(w, h);
     let mut changed = 0u64;
-    for ((pa, pb), out_px) in a.pixels().zip(b.pixels()).zip(out.pixels_mut()) {
-        if pixel_delta(&pa.0, &pb.0) > threshold {
+
+    let a_raw = a.as_raw();
+    let b_raw = b.as_raw();
+    let out_raw: &mut [u8] = &mut out;
+
+    for ((a_chunk, b_chunk), out_chunk) in a_raw
+        .chunks_exact(4)
+        .zip(b_raw.chunks_exact(4))
+        .zip(out_raw.chunks_exact_mut(4))
+    {
+        // manually unroll small loop for measurable speedup
+        let d = a_chunk[0]
+            .abs_diff(b_chunk[0])
+            .max(a_chunk[1].abs_diff(b_chunk[1]))
+            .max(a_chunk[2].abs_diff(b_chunk[2]))
+            .max(a_chunk[3].abs_diff(b_chunk[3]));
+
+        if d > threshold {
             changed += 1;
-            *out_px = PINK;
+            out_chunk.copy_from_slice(&PINK.0);
         } else {
             // Lightened greyscale of the AFTER pixel as quiet context (128..=255).
-            let [r, g, bl, _] = pb.0;
-            let luma = (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * bl as f32) as u32;
+            // Use integer approximations for speedup instead of floats
+            let r = b_chunk[0] as u32;
+            let g = b_chunk[1] as u32;
+            let bl = b_chunk[2] as u32;
+            let luma = (77 * r + 150 * g + 29 * bl) >> 8;
             let v = (128 + luma / 2).min(255) as u8;
-            *out_px = Rgba([v, v, v, 0xFF]);
+
+            out_chunk[0] = v;
+            out_chunk[1] = v;
+            out_chunk[2] = v;
+            out_chunk[3] = 0xFF;
         }
     }
     (out, changed)
@@ -522,13 +535,6 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn delta_is_max_abs_channel() {
-        assert_eq!(pixel_delta(&[10, 20, 30, 255], &[10, 20, 30, 255]), 0);
-        assert_eq!(pixel_delta(&[0, 0, 0, 255], &[5, 0, 200, 255]), 200);
-        assert_eq!(pixel_delta(&[255, 255, 255, 255], &[255, 255, 255, 0]), 255);
-    }
 
     #[test]
     fn max_diff_parses_count_and_percent() {
