@@ -1,0 +1,3 @@
+## 2024-07-21 - Optimize Rust pixel processing with raw slices and integer math
+**Learning:** In the `shotdiff` codebase, `image` crate `.pixels()` iterator has significant overhead compared to raw slice chunks (`.chunks_exact_mut(4)`). Also, float math (e.g., `0.299 * r`) inside tight loops is a severe bottleneck compared to integer approximation (e.g., `(77 * r) >> 8`). Finally, manually unrolling `max` functions avoids overhead and gives a substantial speedup.
+**Action:** When performing pixel manipulations, grab raw slice references (via `image.as_raw()`) and use `.chunks_exact()`. Replace floating point luma computations with `>> 8` integer approximations. Manually unroll short array comparisons.
