@@ -5,11 +5,17 @@
 //!   * PNG mode (default): writes a composite PNG. No browser/GUI — works in CI.
 //!   * Browser mode (`--browser`): writes a self-contained HTML viewer with an
 //!     interactive threshold slider and opens it in the default browser.
+//!
+//! Raster inputs are decoded by the `image` crate; SVG inputs are rasterised with
+//! resvg before the pixel comparison, so both modes see plain RGBA either way.
 
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::{Arc, OnceLock};
 
 use image::{Rgba, RgbaImage};
+use resvg::{tiny_skia, usvg};
 
 /// Pink used to paint changed pixels (#FF2D87).
 const PINK: Rgba<u8> = Rgba([0xFF, 0x2D, 0x87, 0xFF]);
@@ -18,6 +24,11 @@ const GAP: u32 = 16;
 const GAP_BG: Rgba<u8> = Rgba([0x1a, 0x1a, 0x1a, 0xFF]);
 /// Fill colour for padded regions when the two inputs differ in size.
 const PAD_BG: Rgba<u8> = Rgba([0x00, 0x00, 0x00, 0x00]);
+/// Transparent — the default backdrop behind a rasterised SVG.
+const TRANSPARENT: Rgba<u8> = Rgba([0x00, 0x00, 0x00, 0x00]);
+/// Guards against absurd rasterisation targets (a 4x4 icon matched to a huge raster).
+const MAX_SVG_DIM: u32 = 20_000;
+const MAX_SVG_PIXELS: u64 = 100_000_000;
 
 struct Args {
     before: PathBuf,
@@ -29,6 +40,10 @@ struct Args {
     fail_on_diff: bool,
     /// Max tolerated change before failing: (value, is_percent).
     max_diff: Option<(f64, bool)>,
+    /// Uniform scale for SVG inputs; `None` = auto (match the raster it is compared to).
+    svg_scale: Option<f32>,
+    /// Colour painted behind a rasterised SVG.
+    svg_background: Rgba<u8>,
 }
 
 const USAGE: &str = "\
@@ -41,14 +56,21 @@ ARGS:
     <BEFORE>    Path to the first/old image
     <AFTER>     Path to the second/new image
 
+    Raster (PNG/JPEG/WebP/GIF/BMP) and vector (SVG/SVGZ) inputs may be mixed.
+
 OPTIONS:
-    -o, --output <PATH>   Output PNG path (default: shotdiff-out.png)
-    -t, --threshold <N>   Per-channel diff threshold 0-255 (default: 16)
-        --diff-only       Output only the centre DIFF panel
-        --browser         Build an interactive HTML viewer and open it
-        --fail-on-diff    Exit 1 if any pixel changed (visual-regression gate)
-        --max-diff <V>    Fail only if change exceeds V; e.g. 1200 or 0.5%
-    -h, --help            Show this help
+    -o, --output <PATH>       Output PNG path (default: shotdiff-out.png)
+    -t, --threshold <N>       Per-channel diff threshold 0-255 (default: 16)
+        --diff-only           Output only the centre DIFF panel
+        --browser             Build an interactive HTML viewer and open it
+        --fail-on-diff        Exit 1 if any pixel changed (visual-regression gate)
+        --max-diff <V>        Fail only if change exceeds V; e.g. 1200 or 0.5%
+        --svg-scale <F>       Rasterise SVG input at F x its intrinsic size.
+                              Default: auto — an SVG compared against a raster is
+                              scaled to that raster's width; otherwise 1.
+        --svg-background <C>  Backdrop behind rasterised SVG: transparent (default),
+                              white, black, #rgb, #rrggbb or #rrggbbaa
+    -h, --help                Show this help
 
 EXIT CODES:
     0  success (no diff, or diff but no failure gate triggered)
@@ -65,6 +87,8 @@ fn parse_args() -> Result<Args, String> {
     let mut browser = false;
     let mut fail_on_diff = false;
     let mut max_diff: Option<(f64, bool)> = None;
+    let mut svg_scale: Option<f32> = None;
+    let mut svg_background = TRANSPARENT;
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -88,6 +112,14 @@ fn parse_args() -> Result<Args, String> {
             "--max-diff" => {
                 let v = it.next().ok_or("--max-diff requires a value")?;
                 max_diff = Some(parse_max_diff(&v)?);
+            }
+            "--svg-scale" => {
+                let v = it.next().ok_or("--svg-scale requires a value")?;
+                svg_scale = Some(parse_svg_scale(&v)?);
+            }
+            "--svg-background" => {
+                let v = it.next().ok_or("--svg-background requires a value")?;
+                svg_background = parse_color(&v)?;
             }
             s if s.starts_with('-') && s != "-" => {
                 return Err(format!("unknown option: {s}"));
@@ -113,6 +145,8 @@ fn parse_args() -> Result<Args, String> {
         browser,
         fail_on_diff,
         max_diff,
+        svg_scale,
+        svg_background,
     })
 }
 
@@ -129,6 +163,207 @@ fn parse_max_diff(v: &str) -> Result<(f64, bool), String> {
             .map_err(|_| format!("invalid --max-diff count: {v}"))?;
         Ok((n, false))
     }
+}
+
+fn parse_svg_scale(v: &str) -> Result<f32, String> {
+    let n: f32 = v.parse().map_err(|_| format!("invalid --svg-scale: {v}"))?;
+    if !n.is_finite() || n <= 0.0 {
+        return Err(format!(
+            "invalid --svg-scale: {v} (expected a positive number)"
+        ));
+    }
+    Ok(n)
+}
+
+/// `transparent` / `none` / `white` / `black` / `#rgb` / `#rrggbb` / `#rrggbbaa`.
+fn parse_color(v: &str) -> Result<Rgba<u8>, String> {
+    let s = v.trim();
+    match s.to_ascii_lowercase().as_str() {
+        "transparent" | "none" => return Ok(TRANSPARENT),
+        "white" => return Ok(Rgba([0xFF, 0xFF, 0xFF, 0xFF])),
+        "black" => return Ok(Rgba([0x00, 0x00, 0x00, 0xFF])),
+        _ => {}
+    }
+    let hex = s.strip_prefix('#').unwrap_or(s);
+    let nib = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+    let bytes = hex.as_bytes();
+    let chan: Vec<u8> = match bytes.len() {
+        // #rgb / #rgba — each nibble doubled, as in CSS.
+        3 | 4 => bytes
+            .iter()
+            .map(|&c| nib(c).map(|d| d * 0x11))
+            .collect::<Option<_>>(),
+        6 | 8 => bytes
+            .chunks(2)
+            .map(|p| Some(nib(p[0])? * 16 + nib(p[1])?))
+            .collect::<Option<_>>(),
+        _ => None,
+    }
+    .ok_or_else(|| format!("invalid colour: {v}"))?;
+    Ok(Rgba([
+        chan[0],
+        chan[1],
+        chan[2],
+        *chan.get(3).unwrap_or(&0xFF),
+    ]))
+}
+
+// ---------- input loading ----------
+
+/// System fonts, loaded once and shared by every SVG parse in the run.
+fn font_database() -> Arc<usvg::fontdb::Database> {
+    static DB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
+    DB.get_or_init(|| {
+        let mut db = usvg::fontdb::Database::new();
+        db.load_system_fonts();
+        Arc::new(db)
+    })
+    .clone()
+}
+
+/// Cheap sniff for SVG/SVGZ, so we only hand XML to usvg and bytes to `image`.
+fn looks_like_svg(bytes: &[u8]) -> bool {
+    // .svgz is gzip; no raster format the `image` crate decodes starts with that magic.
+    if bytes.starts_with(&[0x1f, 0x8b]) {
+        return true;
+    }
+    let head = String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]);
+    let head = head.trim_start_matches('\u{feff}').trim_start();
+    head.starts_with("<svg")
+        || head.starts_with("<?xml")
+        || head.starts_with("<!--")
+        || head.starts_with("<!DOCTYPE")
+}
+
+/// One CLI-provided image, held in its source form until we know what size a
+/// vector input should be rasterised at.
+struct Input {
+    path: PathBuf,
+    bytes: Vec<u8>,
+    /// `Some` for SVG input; `None` for raster formats decoded by the `image` crate.
+    tree: Option<usvg::Tree>,
+    /// Intrinsic size: SVG user units, or the raster's pixel dimensions.
+    size: (f32, f32),
+}
+
+impl Input {
+    fn load(path: &Path) -> Result<Self, String> {
+        let bytes =
+            std::fs::read(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+
+        if looks_like_svg(&bytes) {
+            let mut opt = usvg::Options {
+                // Lets <image href="logo.png"> and friends resolve next to the SVG.
+                resources_dir: path.parent().map(Path::to_path_buf),
+                ..Default::default()
+            };
+            opt.fontdb = font_database();
+            let tree = usvg::Tree::from_data(&bytes, &opt)
+                .map_err(|e| format!("failed to parse SVG {}: {e}", path.display()))?;
+            let size = (tree.size().width(), tree.size().height());
+            return Ok(Self {
+                path: path.to_path_buf(),
+                bytes,
+                tree: Some(tree),
+                size,
+            });
+        }
+
+        let (w, h) = image::ImageReader::new(Cursor::new(&bytes))
+            .with_guessed_format()
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?
+            .into_dimensions()
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            bytes,
+            tree: None,
+            size: (w as f32, h as f32),
+        })
+    }
+
+    fn is_svg(&self) -> bool {
+        self.tree.is_some()
+    }
+
+    /// Rasterise (SVG) or decode (raster) into RGBA. `scale` applies to SVG only.
+    fn to_rgba(&self, scale: f32, bg: Rgba<u8>) -> Result<RgbaImage, String> {
+        match &self.tree {
+            Some(tree) => rasterize_svg(tree, scale, bg)
+                .map_err(|e| format!("failed to render SVG {}: {e}", self.path.display())),
+            None => Ok(image::load_from_memory(&self.bytes)
+                .map_err(|e| format!("failed to decode {}: {e}", self.path.display()))?
+                .to_rgba8()),
+        }
+    }
+}
+
+/// Render an SVG tree at `scale`, over `bg`, into an un-premultiplied RGBA image.
+fn rasterize_svg(tree: &usvg::Tree, scale: f32, bg: Rgba<u8>) -> Result<RgbaImage, String> {
+    let w = (tree.size().width() * scale).round().max(1.0);
+    let h = (tree.size().height() * scale).round().max(1.0);
+    if w > MAX_SVG_DIM as f32 || h > MAX_SVG_DIM as f32 || w * h > MAX_SVG_PIXELS as f32 {
+        return Err(format!(
+            "rasterised size {w:.0}x{h:.0} is too large (scale {scale}); lower --svg-scale"
+        ));
+    }
+    let (w, h) = (w as u32, h as u32);
+
+    let mut pixmap = tiny_skia::Pixmap::new(w, h).ok_or("could not allocate the render target")?;
+    if bg[3] != 0 {
+        pixmap.fill(tiny_skia::Color::from_rgba8(bg[0], bg[1], bg[2], bg[3]));
+    }
+    resvg::render(
+        tree,
+        tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+
+    // tiny-skia stores premultiplied colour; the diff works on straight RGBA.
+    let mut out = RgbaImage::new(w, h);
+    for (src, dst) in pixmap.pixels().iter().zip(out.pixels_mut()) {
+        let c = src.demultiply();
+        *dst = Rgba([c.red(), c.green(), c.blue(), c.alpha()]);
+    }
+    Ok(out)
+}
+
+/// Rasterisation scale for each input. An explicit `--svg-scale` wins; otherwise a
+/// lone SVG is matched to the width of the raster it is compared against, so the two
+/// line up instead of diffing as one big block of pink.
+fn svg_scales(a: &Input, b: &Input, explicit: Option<f32>) -> (f32, f32) {
+    if let Some(s) = explicit {
+        return (s, s);
+    }
+    let fit = |svg_w: f32, raster_w: f32| {
+        if svg_w > 0.0 { raster_w / svg_w } else { 1.0 }
+    };
+    match (a.is_svg(), b.is_svg()) {
+        (true, false) => (fit(a.size.0, b.size.0), 1.0),
+        (false, true) => (1.0, fit(b.size.0, a.size.0)),
+        _ => (1.0, 1.0),
+    }
+}
+
+/// Load both inputs, resolving SVG scales against each other.
+fn load_pair(args: &Args) -> Result<(Input, Input, f32, f32), String> {
+    let a = Input::load(&args.before)?;
+    let b = Input::load(&args.after)?;
+    let (sa, sb) = svg_scales(&a, &b, args.svg_scale);
+    for (input, scale) in [(&a, sa), (&b, sb)] {
+        if input.is_svg() {
+            eprintln!(
+                "shotdiff: rasterising {} at {:.3}x ({:.0}x{:.0} -> {:.0}x{:.0})",
+                input.path.display(),
+                scale,
+                input.size.0,
+                input.size.1,
+                (input.size.0 * scale).round().max(1.0),
+                (input.size.1 * scale).round().max(1.0),
+            );
+        }
+    }
+    Ok((a, b, sa, sb))
 }
 
 /// Per-pixel max absolute channel difference across RGBA.
@@ -211,12 +446,9 @@ impl DiffResult {
 }
 
 fn run_png(args: &Args) -> Result<DiffResult, String> {
-    let img_a = image::open(&args.before)
-        .map_err(|e| format!("failed to read {}: {e}", args.before.display()))?
-        .to_rgba8();
-    let img_b = image::open(&args.after)
-        .map_err(|e| format!("failed to read {}: {e}", args.after.display()))?
-        .to_rgba8();
+    let (in_a, in_b, scale_a, scale_b) = load_pair(args)?;
+    let img_a = in_a.to_rgba(scale_a, args.svg_background)?;
+    let img_b = in_b.to_rgba(scale_b, args.svg_background)?;
 
     let w = img_a.width().max(img_b.width());
     let h = img_a.height().max(img_b.height());
@@ -302,19 +534,27 @@ fn sniff_mime(data: &[u8]) -> &'static str {
     }
 }
 
-fn data_uri(path: &Path) -> Result<String, String> {
-    let bytes =
-        std::fs::read(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+/// Raster inputs are embedded byte-for-byte; SVG input is rasterised first so the
+/// viewer diffs exactly the pixels PNG mode would.
+fn data_uri(input: &Input, scale: f32, bg: Rgba<u8>) -> Result<String, String> {
+    if input.is_svg() {
+        let img = input.to_rgba(scale, bg)?;
+        let mut png = Cursor::new(Vec::new());
+        img.write_to(&mut png, image::ImageFormat::Png)
+            .map_err(|e| format!("failed to encode {}: {e}", input.path.display()))?;
+        return Ok(format!("data:image/png;base64,{}", b64(&png.into_inner())));
+    }
     Ok(format!(
         "data:{};base64,{}",
-        sniff_mime(&bytes),
-        b64(&bytes)
+        sniff_mime(&input.bytes),
+        b64(&input.bytes)
     ))
 }
 
 fn run_browser(args: &Args) -> Result<(), String> {
-    let uri_a = data_uri(&args.before)?;
-    let uri_b = data_uri(&args.after)?;
+    let (in_a, in_b, scale_a, scale_b) = load_pair(args)?;
+    let uri_a = data_uri(&in_a, scale_a, args.svg_background)?;
+    let uri_b = data_uri(&in_b, scale_b, args.svg_background)?;
     let html = build_html(&uri_a, &uri_b, args.threshold);
 
     let pid = std::process::id();
@@ -549,6 +789,8 @@ mod tests {
             browser: false,
             fail_on_diff,
             max_diff,
+            svg_scale: None,
+            svg_background: TRANSPARENT,
         };
         let res = DiffResult {
             changed: 50,
@@ -584,5 +826,109 @@ mod tests {
             !clean.fails(&base(None, true)),
             "0 change → fail-on-diff ok"
         );
+    }
+
+    const SQUARE_SVG: &[u8] =
+        br##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20" fill="#00f"/></svg>"##;
+
+    #[test]
+    fn svg_is_sniffed_from_content_not_extension() {
+        assert!(looks_like_svg(SQUARE_SVG));
+        assert!(looks_like_svg(
+            b"\xEF\xBB\xBF\n  <?xml version=\"1.0\"?><svg/>"
+        ));
+        assert!(looks_like_svg(&[0x1f, 0x8b, 0x08, 0x00])); // .svgz
+        assert!(!looks_like_svg(&[0x89, b'P', b'N', b'G']));
+        assert!(!looks_like_svg(b""));
+    }
+
+    #[test]
+    fn colours_parse() {
+        assert_eq!(parse_color("transparent").unwrap(), TRANSPARENT);
+        assert_eq!(parse_color("white").unwrap(), Rgba([255, 255, 255, 255]));
+        assert_eq!(parse_color("#f00").unwrap(), Rgba([255, 0, 0, 255]));
+        assert_eq!(
+            parse_color("#12345678").unwrap(),
+            Rgba([0x12, 0x34, 0x56, 0x78])
+        );
+        assert_eq!(parse_color("00FF7F").unwrap(), Rgba([0, 255, 127, 255]));
+        assert!(parse_color("#gg0000").is_err());
+        assert!(parse_color("#12345").is_err());
+    }
+
+    #[test]
+    fn svg_scale_parses() {
+        assert_eq!(parse_svg_scale("2").unwrap(), 2.0);
+        assert_eq!(parse_svg_scale("0.5").unwrap(), 0.5);
+        assert!(parse_svg_scale("0").is_err());
+        assert!(parse_svg_scale("-1").is_err());
+        assert!(parse_svg_scale("big").is_err());
+    }
+
+    fn svg_input(bytes: &[u8]) -> Input {
+        let opt = usvg::Options::default();
+        let tree = usvg::Tree::from_data(bytes, &opt).unwrap();
+        let size = (tree.size().width(), tree.size().height());
+        Input {
+            path: PathBuf::from("mem.svg"),
+            bytes: bytes.to_vec(),
+            tree: Some(tree),
+            size,
+        }
+    }
+
+    fn raster_input(w: f32, h: f32) -> Input {
+        Input {
+            path: PathBuf::from("mem.png"),
+            bytes: Vec::new(),
+            tree: None,
+            size: (w, h),
+        }
+    }
+
+    #[test]
+    fn lone_svg_is_scaled_to_the_raster_it_is_compared_with() {
+        let svg = svg_input(SQUARE_SVG); // 40x20
+        let png = raster_input(120.0, 60.0);
+
+        assert_eq!(svg_scales(&svg, &png, None), (3.0, 1.0));
+        assert_eq!(svg_scales(&png, &svg, None), (1.0, 3.0));
+        // Explicit --svg-scale wins over the auto fit.
+        assert_eq!(svg_scales(&svg, &png, Some(2.0)), (2.0, 2.0));
+        // Two SVGs (or two rasters) render at their intrinsic size.
+        assert_eq!(svg_scales(&svg, &svg_input(SQUARE_SVG), None), (1.0, 1.0));
+        assert_eq!(svg_scales(&png, &raster_input(9.0, 9.0), None), (1.0, 1.0));
+    }
+
+    #[test]
+    fn svg_rasterises_at_scale_over_the_background() {
+        let svg = svg_input(SQUARE_SVG);
+
+        let img = svg.to_rgba(1.0, TRANSPARENT).unwrap();
+        assert_eq!(img.dimensions(), (40, 20));
+        assert_eq!(*img.get_pixel(20, 10), Rgba([0, 0, 255, 255]));
+
+        let scaled = svg.to_rgba(2.5, TRANSPARENT).unwrap();
+        assert_eq!(scaled.dimensions(), (100, 50));
+
+        // The rect covers the whole viewport, so the backdrop only shows outside it.
+        let dot =
+            svg_input(br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"></svg>"#);
+        assert_eq!(
+            *dot.to_rgba(1.0, TRANSPARENT).unwrap().get_pixel(5, 5),
+            TRANSPARENT
+        );
+        assert_eq!(
+            *dot.to_rgba(1.0, Rgba([255, 255, 255, 255]))
+                .unwrap()
+                .get_pixel(5, 5),
+            Rgba([255, 255, 255, 255])
+        );
+    }
+
+    #[test]
+    fn absurd_rasterisation_targets_are_refused() {
+        let svg = svg_input(SQUARE_SVG);
+        assert!(svg.to_rgba(100_000.0, TRANSPARENT).is_err());
     }
 }
