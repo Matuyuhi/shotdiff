@@ -369,11 +369,10 @@ fn load_pair(args: &Args) -> Result<(Input, Input, f32, f32), String> {
 /// Per-pixel max absolute channel difference across RGBA.
 #[inline]
 fn pixel_delta(a: &[u8; 4], b: &[u8; 4]) -> u8 {
-    let mut d = 0u8;
-    for i in 0..4 {
-        d = d.max(a[i].abs_diff(b[i]));
-    }
-    d
+    a[0].abs_diff(b[0])
+        .max(a[1].abs_diff(b[1]))
+        .max(a[2].abs_diff(b[2]))
+        .max(a[3].abs_diff(b[3]))
 }
 
 /// Place `src` at the top-left of a `w`x`h` canvas filled with `bg`.
@@ -399,7 +398,8 @@ fn build_diff(a: &RgbaImage, b: &RgbaImage, threshold: u8) -> (RgbaImage, u64) {
         } else {
             // Lightened greyscale of the AFTER pixel as quiet context (128..=255).
             let [r, g, bl, _] = pb.0;
-            let luma = (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * bl as f32) as u32;
+            // Use integer approximation for luma to avoid floating-point arithmetic.
+            let luma = (77 * r as u32 + 150 * g as u32 + 29 * bl as u32) >> 8;
             let v = (128 + luma / 2).min(255) as u8;
             *out_px = Rgba([v, v, v, 0xFF]);
         }
