@@ -17,8 +17,6 @@ use std::sync::{Arc, OnceLock};
 use image::{Rgba, RgbaImage};
 use resvg::{tiny_skia, usvg};
 
-/// Pink used to paint changed pixels (#FF2D87).
-const PINK: Rgba<u8> = Rgba([0xFF, 0x2D, 0x87, 0xFF]);
 /// Gap (px) between panels in the composite, and its colour.
 const GAP: u32 = 16;
 const GAP_BG: Rgba<u8> = Rgba([0x1a, 0x1a, 0x1a, 0xFF]);
@@ -368,12 +366,11 @@ fn load_pair(args: &Args) -> Result<(Input, Input, f32, f32), String> {
 
 /// Per-pixel max absolute channel difference across RGBA.
 #[inline]
-fn pixel_delta(a: &[u8; 4], b: &[u8; 4]) -> u8 {
-    let mut d = 0u8;
-    for i in 0..4 {
-        d = d.max(a[i].abs_diff(b[i]));
-    }
-    d
+fn pixel_delta(a: &[u8], b: &[u8]) -> u8 {
+    a[0].abs_diff(b[0])
+        .max(a[1].abs_diff(b[1]))
+        .max(a[2].abs_diff(b[2]))
+        .max(a[3].abs_diff(b[3]))
 }
 
 /// Place `src` at the top-left of a `w`x`h` canvas filled with `bg`.
@@ -392,16 +389,26 @@ fn build_diff(a: &RgbaImage, b: &RgbaImage, threshold: u8) -> (RgbaImage, u64) {
     let (w, h) = a.dimensions();
     let mut out = RgbaImage::new(w, h);
     let mut changed = 0u64;
-    for ((pa, pb), out_px) in a.pixels().zip(b.pixels()).zip(out.pixels_mut()) {
-        if pixel_delta(&pa.0, &pb.0) > threshold {
+
+    let a_raw = a.as_raw();
+    let b_raw = b.as_raw();
+
+    for ((pa, pb), out_px) in a_raw
+        .chunks_exact(4)
+        .zip(b_raw.chunks_exact(4))
+        .zip(out.chunks_exact_mut(4))
+    {
+        if pixel_delta(pa, pb) > threshold {
             changed += 1;
-            *out_px = PINK;
+            out_px.copy_from_slice(&[0xFF, 0x2D, 0x87, 0xFF]);
         } else {
             // Lightened greyscale of the AFTER pixel as quiet context (128..=255).
-            let [r, g, bl, _] = pb.0;
-            let luma = (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * bl as f32) as u32;
+            let r = pb[0] as u32;
+            let g = pb[1] as u32;
+            let bl = pb[2] as u32;
+            let luma = (77 * r + 150 * g + 29 * bl) >> 8;
             let v = (128 + luma / 2).min(255) as u8;
-            *out_px = Rgba([v, v, v, 0xFF]);
+            out_px.copy_from_slice(&[v, v, v, 0xFF]);
         }
     }
     (out, changed)
