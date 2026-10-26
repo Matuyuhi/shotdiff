@@ -1,0 +1,3 @@
+## 2025-01-01 - Pixel Iteration and Float Arithmetic Optimization
+**Learning:** In Rust, iterating over `image::RgbaImage` via `.pixels()` is significantly slower than chunked iteration over the underlying raw byte slice (`&*image`). Furthermore, floating point operations for luma calculation (`(0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) as u32`) and unrolling a loop to find max pixel diff add up in tight pixel processing loops.
+**Action:** Always process image pixels by taking their underlying raw slice using `&*image`, iterating in chunks of 4 (for RGBA). Replace floating point multiplications with integer approximations (e.g. `(77 * r + 150 * g + 29 * b) >> 8`), and manually unroll loops with known bounds (e.g., 4 channels).
