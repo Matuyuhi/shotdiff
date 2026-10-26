@@ -1,0 +1,3 @@
+## 2024-05-14 - Fast Floating-point alternatives in Tight Pixel Processing Loops
+**Learning:** Using floating-point arithmetic (e.g. `0.299 * R + 0.587 * G + 0.114 * B`) for grayscale/luma calculation inside hot pixel processing loops is significantly slower in JS (in browser mode) and slightly slower in Rust. Integer approximation `(77 * R + 150 * G + 29 * B) >> 8` avoids floating-point operations and yields correct output but acts drastically faster, particularly in the generated HTML viewer (JS performance).
+**Action:** Replace floating point luma approximations with integer arithmetic equivalents when looping over image pixels.
